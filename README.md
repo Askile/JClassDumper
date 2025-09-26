@@ -1,6 +1,6 @@
 **JClassDumper** is a Windows DLL project designed to scan the memory of the any java process, locate Java .class files by their magic number (CA FE BA BE), and dump them to disk
 
-It uses pattern scanning with configurable parameters (stored in %appdata%/JClassDumper/config.json) ot identify Java class files in memory and extract them into .class files for analysis or reverse engineering purposes.
+It uses pattern scanning with configurable parameters ot identify Java class files in memory and extract them into .class files for analysis or reverse engineering purposes.
 
 ```json
 {
@@ -32,3 +32,4 @@ Example:
 - On attach the dumper will start scanning automatically and create .class files in the dum folder.
 - Scanning may cause temporary system lag or increased CPU/disk activity - this is normal while the dumper reads process memory.
 - After dumping, you can collect all .class files into a single archive and open or decompile them using Recaf or any Java bytecode analysis tool.
+Dump results and config located at %appdata%/local/JClassDumper
