@@ -3,7 +3,6 @@
 #include <Dumper.h>
 #include <string>
 #include "Utils.h"
-#include "Logger.h"
 
 BOOL APIENTRY DllMain(HINSTANCE hInstance, DWORD fdwReason, LPVOID lpReserved)
 {

@@ -29,6 +29,9 @@
 
 HWND g_hWnd = nullptr;
 
+constexpr SIZE_T maxClassSize = 8 * 1024 * 1024;
+constexpr SIZE_T readChunk = 128 * 1024;
+
 const std::string basePath = Utils::GetLocalAppDataPath() + "\\JClassDumper\\dump";
 
 static std::atomic_bool g_scanning(false);
@@ -249,7 +252,6 @@ SIZE_T getClassSize(const BYTE* buf, SIZE_T bufSize, const BYTE* pattern, int he
 
 bool saveClassToFile(const BYTE* buf, SIZE_T size, int index) {
     if (size == 0 || size > 8192 * 1024) return false;
-    std::filesystem::create_directories(basePath);
     std::ostringstream path;
     path << basePath + "\\" << index << ".class";
     std::ofstream out(path.str(), std::ios::binary);
@@ -259,6 +261,17 @@ bool saveClassToFile(const BYTE* buf, SIZE_T size, int index) {
     return true;
 }
 
+static bool safeMemcpy(void* dst, void* src, SIZE_T size) {
+    __try {
+        memcpy(dst, src, size);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+
 void Dumper::findSignatures(const BYTE* pattern, size_t pattern_size, int header_size) {
     MEMORY_BASIC_INFORMATION mbi;
     SYSTEM_INFO si;
@@ -266,12 +279,20 @@ void Dumper::findSignatures(const BYTE* pattern, size_t pattern_size, int header
 
     uintptr_t address = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
     uintptr_t endAddress = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
-    const SIZE_T maxClassSize = 8192 * 1024;
+
     int classIndex = 0;
+
+    std::filesystem::create_directories(basePath);
 
     std::vector<BYTE> readBuf;
     std::vector<BYTE> workingBuf;
     std::vector<BYTE> carry;
+
+    readBuf.reserve(readChunk);
+    workingBuf.reserve(readChunk * 2);
+    carry.reserve(1024);
+
+    size_t filesWrittenSinceThrottle = 0;
 
     while (address < endAddress && VirtualQuery((LPCVOID)address, &mbi, sizeof(mbi))) {
         uintptr_t regionBase = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
@@ -283,11 +304,16 @@ void Dumper::findSignatures(const BYTE* pattern, size_t pattern_size, int header
 
         if (readable) {
             for (uintptr_t base = regionBase; base < regionEnd; ) {
-                SIZE_T toRead = static_cast<SIZE_T>(std::min<uintptr_t>(maxClassSize, regionEnd - base));
+                SIZE_T toRead = static_cast<SIZE_T>(std::min<uintptr_t>(readChunk, regionEnd - base));
                 readBuf.resize(toRead);
-                SIZE_T bytesRead = 0;
 
-                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(base), readBuf.data(), toRead, &bytesRead) || bytesRead < 4) {
+                if (!safeMemcpy(readBuf.data(), reinterpret_cast<void*>(base), toRead)) {
+                    base += toRead;
+                    continue;
+                }
+
+                SIZE_T bytesRead = toRead;
+                if (bytesRead < pattern_size) {
                     base += toRead;
                     continue;
                 }
@@ -302,10 +328,12 @@ void Dumper::findSignatures(const BYTE* pattern, size_t pattern_size, int header
                 workingBuf.insert(workingBuf.end(), readBuf.begin(), readBuf.end());
 
                 SIZE_T offset = 0;
+
                 while (offset + pattern_size <= workingBuf.size()) {
                     if (memcmp(workingBuf.data() + offset, pattern, pattern_size) == 0) {
                         SIZE_T available = workingBuf.size() - offset;
                         SIZE_T classSize = getClassSize(workingBuf.data() + offset, available, pattern, header_size);
+
                         if (classSize == 0 || classSize > maxClassSize) {
                             if (available > 0) {
                                 SIZE_T carrySize = std::min<SIZE_T>(available, maxClassSize);
@@ -313,6 +341,7 @@ void Dumper::findSignatures(const BYTE* pattern, size_t pattern_size, int header
                             }
                             break;
                         }
+
                         if (offset + classSize > workingBuf.size()) {
                             SIZE_T available2 = workingBuf.size() - offset;
                             SIZE_T carrySize = std::min<SIZE_T>(available2, maxClassSize);
@@ -320,13 +349,18 @@ void Dumper::findSignatures(const BYTE* pattern, size_t pattern_size, int header
                             break;
                         }
 
-                        saveClassToFile(workingBuf.data() + offset, classSize, classIndex++);
+                        if (saveClassToFile(workingBuf.data() + offset, classSize, classIndex++)) {
+                            filesWrittenSinceThrottle++;
+                            if ((filesWrittenSinceThrottle & 0x1FF) == 0) {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                            }
+                        }
 
                         offset += classSize;
                         continue;
                     }
+
                     offset++;
-                    if ((offset & 0xFFF) == 0) Sleep(0);
                 }
 
                 if (offset < workingBuf.size()) {
@@ -338,6 +372,7 @@ void Dumper::findSignatures(const BYTE* pattern, size_t pattern_size, int header
                 }
 
                 base += toRead;
+
                 if (!g_scanning.load()) return;
             }
         }
@@ -346,7 +381,7 @@ void Dumper::findSignatures(const BYTE* pattern, size_t pattern_size, int header
         if (address == 0) break;
         if (!g_scanning.load()) return;
 
-        Sleep(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
